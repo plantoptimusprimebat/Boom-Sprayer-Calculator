@@ -4,6 +4,9 @@ from __future__ import annotations
 import math
 from io import BytesIO
 
+from datetime import datetime
+from zoneinfo import Zoneinfo
+
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import streamlit as st
@@ -457,10 +460,13 @@ with copy_column:
         st.caption("Use the copy icon in the top-right of the result box.")
         st.code(summary, language=None)
 with export_column:
+    export_timestamp = datetime.now(
+    ZoneInfo("Africa/Johannesburg")
+).strftime("%Y_%m_%d %H-%M")
     st.download_button(
         "Export results to Excel",
         data=excel_file,
-        file_name="boom_sprayer_calibration.xlsx",
+        file_name=f"boom_sprayer_calibration_{export_timestamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
