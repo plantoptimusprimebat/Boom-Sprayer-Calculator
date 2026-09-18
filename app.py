@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import math
+from io import BytesIO
 
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import streamlit as st
 
 st.set_page_config(page_title="Boom Sprayer Calibration", page_icon="🚜", layout="centered")
@@ -165,6 +168,157 @@ def build_summary(
     return "\n".join(rows)
 
 
+def build_excel_export(
+    distance: float,
+    seconds: float | None,
+    width: float | None,
+    readings: list[float | None],
+    tank_volume: float | None,
+    products: list[dict[str, object]],
+) -> bytes:
+    """Create a formatted Excel workbook with editable inputs and formulas."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Calibration"
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
+    workbook.calculation.calcMode = "auto"
+
+    dark_green = "0B5B3D"
+    soft_green = "E8F4ED"
+    pale_yellow = "FFF2CC"
+    white = "FFFFFF"
+    thin_green = Side(style="thin", color="7FA98B")
+    section_fill = PatternFill("solid", fgColor=dark_green)
+    input_fill = PatternFill("solid", fgColor=pale_yellow)
+    result_fill = PatternFill("solid", fgColor=soft_green)
+    border = Border(left=thin_green, right=thin_green, top=thin_green, bottom=thin_green)
+
+    sheet.merge_cells("A1:D1")
+    sheet["A1"] = "Boom Sprayer Calibration Results"
+    sheet["A1"].font = Font(bold=True, color=white, size=16)
+    sheet["A1"].fill = section_fill
+    sheet["A1"].alignment = Alignment(horizontal="center")
+    sheet.row_dimensions[1].height = 26
+
+    sheet["A3"] = "Calibration inputs"
+    sheet["A3"].font = Font(bold=True, color=white)
+    sheet["A3"].fill = section_fill
+    sheet.merge_cells("A3:D3")
+
+    inputs = [
+        ("Test distance (m)", distance),
+        ("Time over distance (seconds)", seconds),
+        ("Spray width (m)", width),
+        ("Number of boom nozzles", len(readings)),
+        ("Tank volume (L)", tank_volume),
+    ]
+    for row, (label, value) in enumerate(inputs, start=4):
+        sheet.cell(row, 1, label)
+        value_cell = sheet.cell(row, 2, value)
+        value_cell.fill = input_fill
+        value_cell.border = border
+        value_cell.font = Font(color="0000FF")
+        value_cell.number_format = "0.000"
+        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+
+    nozzle_header_row = 10
+    sheet.cell(nozzle_header_row, 1, "Nozzle readings")
+    sheet.cell(nozzle_header_row, 1).font = Font(bold=True, color=white)
+    sheet.cell(nozzle_header_row, 1).fill = section_fill
+    sheet.merge_cells(start_row=nozzle_header_row, start_column=1, end_row=nozzle_header_row, end_column=4)
+    for column, heading in enumerate(["Nozzle", "Catch (ml)", "Deviation vs mean", "Status"], start=1):
+        cell = sheet.cell(nozzle_header_row + 1, column, heading)
+        cell.font = Font(bold=True, color=white)
+        cell.fill = section_fill
+        cell.border = border
+
+    nozzle_first_row = nozzle_header_row + 2
+    nozzle_last_row = nozzle_first_row + len(readings) - 1
+    for index, reading in enumerate(readings, start=1):
+        row = nozzle_first_row + index - 1
+        sheet.cell(row, 1, index)
+        reading_cell = sheet.cell(row, 2, reading)
+        reading_cell.fill = input_fill
+        reading_cell.border = border
+        reading_cell.font = Font(color="0000FF")
+        reading_cell.number_format = "0.000"
+        deviation_cell = sheet.cell(row, 3, f'=IFERROR((B{row}-$B${nozzle_last_row + 4})/$B${nozzle_last_row + 4},"")')
+        deviation_cell.number_format = "0.0%"
+        status_cell = sheet.cell(row, 4, f'=IF(C{row}="","",IF(ABS(C{row})>10%,"Check","OK"))')
+        for column in range(1, 5):
+            sheet.cell(row, column).border = border
+
+    result_header_row = nozzle_last_row + 2
+    sheet.cell(result_header_row, 1, "Calculated results")
+    sheet.cell(result_header_row, 1).font = Font(bold=True, color=white)
+    sheet.cell(result_header_row, 1).fill = section_fill
+    sheet.merge_cells(start_row=result_header_row, start_column=1, end_row=result_header_row, end_column=4)
+
+    result_rows = [
+        ("Total catch (L)", f'=IFERROR(SUM(B{nozzle_first_row}:B{nozzle_last_row})/1000,"")', "0.000"),
+        ("Mean per nozzle (ml)", f'=IFERROR(AVERAGE(B{nozzle_first_row}:B{nozzle_last_row}),"")', "0.000"),
+        ("Lowest nozzle catch (ml)", f'=IFERROR(MIN(B{nozzle_first_row}:B{nozzle_last_row}),"")', "0.000"),
+        ("Highest nozzle catch (ml)", f'=IFERROR(MAX(B{nozzle_first_row}:B{nozzle_last_row}),"")', "0.000"),
+        ("Spray volume (L/ha)", f'=IFERROR(10000*B{result_header_row + 1}/($B$4*$B$6),"")', "0.000"),
+        ("Travel speed (km/h)", '=IFERROR($B$4/$B$5*3.6,"")', "0.00"),
+        ("Area per tank (ha)", f'=IFERROR($B$8/B{result_header_row + 5},"")', "0.000"),
+    ]
+    for offset, (label, formula, number_format) in enumerate(result_rows, start=1):
+        row = result_header_row + offset
+        sheet.cell(row, 1, label)
+        result_cell = sheet.cell(row, 2, formula)
+        result_cell.number_format = number_format
+        result_cell.fill = result_fill
+        result_cell.font = Font(bold=True)
+        for column in range(1, 5):
+            sheet.cell(row, column).border = border
+        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+
+    area_cell = f"B{result_header_row + len(result_rows)}"
+    product_header_row = result_header_row + len(result_rows) + 2
+    sheet.cell(product_header_row, 1, "Products per tank")
+    sheet.cell(product_header_row, 1).font = Font(bold=True, color=white)
+    sheet.cell(product_header_row, 1).fill = section_fill
+    sheet.merge_cells(start_row=product_header_row, start_column=1, end_row=product_header_row, end_column=4)
+    for column, heading in enumerate(["Product", "Label rate", "Unit", "Required per tank"], start=1):
+        cell = sheet.cell(product_header_row + 1, column, heading)
+        cell.font = Font(bold=True, color=white)
+        cell.fill = section_fill
+        cell.border = border
+
+    for index, product in enumerate(products, start=1):
+        row = product_header_row + 1 + index
+        name_cell = sheet.cell(row, 1, product["name"])
+        rate_cell = sheet.cell(row, 2, product["rate"])
+        unit_cell = sheet.cell(row, 3, product["unit"])
+        amount_cell = sheet.cell(row, 4, f'=IFERROR({area_cell}*B{row},"")')
+        for cell in (name_cell, rate_cell, unit_cell):
+            cell.fill = input_fill
+            cell.font = Font(color="0000FF")
+        rate_cell.number_format = "0.000"
+        amount_cell.number_format = "0.000"
+        amount_cell.fill = result_fill
+        amount_cell.font = Font(bold=True)
+        for column in range(1, 5):
+            sheet.cell(row, column).border = border
+
+    note_row = product_header_row + len(products) + 4
+    sheet.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=4)
+    sheet.cell(note_row, 1, "Yellow cells are editable inputs; green cells are calculated in Excel.")
+    sheet.cell(note_row, 1).font = Font(italic=True, color="555555")
+
+    sheet.column_dimensions["A"].width = 30
+    sheet.column_dimensions["B"].width = 18
+    sheet.column_dimensions["C"].width = 20
+    sheet.column_dimensions["D"].width = 22
+    sheet.freeze_panes = "A4"
+
+    stream = BytesIO()
+    workbook.save(stream)
+    return stream.getvalue()
+
+
 st.title("Boom Sprayer Calibration")
 st.write(
     "Enter the catch from each nozzle separately. The calculator finds the average "
@@ -296,12 +450,21 @@ summary = build_summary(
     area_per_tank,
     products,
 )
-left, right = st.columns(2)
-with left:
+excel_file = build_excel_export(distance, seconds, width, readings, tank_volume, products)
+copy_column, export_column, reset_column = st.columns(3)
+with copy_column:
     with st.expander("Copy results"):
         st.caption("Use the copy icon in the top-right of the result box.")
         st.code(summary, language=None)
-with right:
+with export_column:
+    st.download_button(
+        "Export results to Excel",
+        data=excel_file,
+        file_name="boom_sprayer_calibration.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+with reset_column:
     st.button("Reset calculator", on_click=reset, type="secondary", use_container_width=True)
 
 st.divider()
