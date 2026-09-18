@@ -5,7 +5,7 @@ import math
 from io import BytesIO
 
 from datetime import datetime
-from zoneinfo import Zoneinfo
+from zoneinfo import zoneinfo
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
