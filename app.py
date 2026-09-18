@@ -67,7 +67,7 @@ st.title("Boom Sprayer Calibration")
 st.write("Enter the catch from each nozzle separately. The calculator finds the average output, identifies uneven nozzles, and calculates spray volume.")
 
 with st.expander("Field test method", expanded=True):
-    st.markdown("""1. Measure the test distance: normally **100 m for a tractor** or **10 m for a knapsack**.
+    st.markdown("""1. Measure the test distance: normally **100 m for a tractor** or **30 m for a knapsack**.
 2. Travel that distance at normal spraying speed and record the time.
 3. Run the sprayer for the same time and catch the output from **every nozzle on the boom**. Enter each catch below in ml.
 
