@@ -136,7 +136,7 @@ def product_entries(product_count: int, area_per_tank: float | None) -> list[dic
             ).strip()
         with rate_column:
             rate = st.number_input(
-                "Label rate",
+                "Label rate (per ha)",
                 min_value=0.0,
                 step=0.1,
                 value=None,
