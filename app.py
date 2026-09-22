@@ -1,11 +1,9 @@
-"""Boom Sprayer Calibration calculator."""
+"""Boom Sprayer Calibration calculator with three nozzle-catch replications."""
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
-
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -13,9 +11,6 @@ import streamlit as st
 
 st.set_page_config(page_title="Boom Sprayer Calibration", page_icon="🚜", layout="centered")
 
-# The theme in .streamlit/config.toml is the primary setting. These explicit
-# colours prevent a white-background/white-text conflict if a visitor has a
-# different saved Streamlit appearance preference.
 st.markdown(
     """
 <style>
@@ -56,6 +51,7 @@ BASE_KEYS = [
     "product_count",
 ]
 UNIT_OPTIONS = ("ml", "g", "L", "kg")
+REPLICATIONS = (1, 2, 3)
 
 
 def valid(value: object) -> bool:
@@ -69,14 +65,61 @@ def show(value: object, decimals: int = 1) -> str:
 
 
 def reset() -> None:
-    """Restore the original calculator state, including all product rows."""
+    """Restore the original calculator state, including reps and product rows."""
     keys = set(BASE_KEYS) | {
         key
         for key in st.session_state
-        if key.startswith("nozzle_") or key.startswith("product_")
+        if key.startswith("rep_") or key.startswith("product_")
     }
     for key in keys:
         st.session_state.pop(key, None)
+
+
+def replication_readings(nozzle_count: int) -> list[list[float | None]]:
+    """Return nozzle catches, grouped by replication."""
+    return [
+        [st.session_state.get(f"rep_{replication}_nozzle_{index}") for index in range(nozzle_count)]
+        for replication in REPLICATIONS
+    ]
+
+
+def calculation_results(readings_by_rep: list[list[float | None]]) -> dict[str, object]:
+    """Calculate calibration values only when all three replications are complete."""
+    nozzle_count = len(readings_by_rep[0])
+    complete = all(
+        len([value for value in replication if valid(value) and value >= 0]) == nozzle_count
+        for replication in readings_by_rep
+    )
+    entered_per_rep = [len([value for value in replication if valid(value) and value >= 0]) for replication in readings_by_rep]
+    if not complete:
+        return {
+            "complete": False,
+            "entered_per_rep": entered_per_rep,
+            "nozzle_means": [None] * nozzle_count,
+            "overall_mean": None,
+            "low": None,
+            "high": None,
+            "average_total_ml": None,
+            "deviations": [None] * nozzle_count,
+        }
+
+    nozzle_means = [sum(replication[index] for replication in readings_by_rep) / len(REPLICATIONS) for index in range(nozzle_count)]
+    overall_mean = sum(nozzle_means) / nozzle_count
+    deviations = [
+        (nozzle_mean - overall_mean) / overall_mean * 100 if overall_mean else None
+        for nozzle_mean in nozzle_means
+    ]
+    average_total_ml = sum(sum(replication) for replication in readings_by_rep) / len(REPLICATIONS)
+    return {
+        "complete": True,
+        "entered_per_rep": entered_per_rep,
+        "nozzle_means": nozzle_means,
+        "overall_mean": overall_mean,
+        "low": min(nozzle_means),
+        "high": max(nozzle_means),
+        "average_total_ml": average_total_ml,
+        "deviations": deviations,
+    }
 
 
 def product_entries(product_count: int, area_per_tank: float | None) -> list[dict[str, object]]:
@@ -90,7 +133,6 @@ def product_entries(product_count: int, area_per_tank: float | None) -> list[dic
                 "Product name",
                 placeholder=f"Product {index + 1}",
                 key=f"product_name_{index}",
-                label_visibility="visible",
             ).strip()
         with rate_column:
             rate = st.number_input(
@@ -102,22 +144,11 @@ def product_entries(product_count: int, area_per_tank: float | None) -> list[dic
                 key=f"product_rate_{index}",
             )
         with unit_column:
-            unit = st.selectbox(
-                "Rate unit",
-                options=UNIT_OPTIONS,
-                key=f"product_unit_{index}",
-            )
+            unit = st.selectbox("Rate unit", options=UNIT_OPTIONS, key=f"product_unit_{index}")
         amount = area_per_tank * rate if valid(area_per_tank) and valid(rate) else None
         with amount_column:
             st.metric(f"Per tank ({unit})", show(amount, 3))
-        entries.append(
-            {
-                "name": name or f"Product {index + 1}",
-                "rate": rate,
-                "unit": unit,
-                "amount": amount,
-            }
-        )
+        entries.append({"name": name or f"Product {index + 1}", "rate": rate, "unit": unit, "amount": amount})
     return entries
 
 
@@ -125,11 +156,8 @@ def build_summary(
     distance: float,
     seconds: float | None,
     width: float | None,
-    readings: list[float | None],
-    total_litres: float | None,
-    mean: float | None,
-    low: float | None,
-    high: float | None,
+    readings_by_rep: list[list[float | None]],
+    results: dict[str, object],
     spray_volume: float | None,
     speed: float | None,
     tank_volume: float | None,
@@ -138,35 +166,42 @@ def build_summary(
 ) -> str:
     """Build the copy-ready result summary."""
     rows = [
-        "BOOM SPRAYER CALIBRATION",
+        "BOOM SPRAYER CALIBRATION — 3 REPLICATIONS",
         "",
         f"Test distance: {show(distance)} m",
         f"Time over distance: {show(seconds)} s",
         f"Spray width: {show(width, 2)} m",
         "",
-        "Individual nozzle catches:",
     ]
-    rows.extend(f"  Nozzle {index + 1}: {show(reading)} ml" for index, reading in enumerate(readings))
-    rows.extend(
-        [
-            "",
-            f"Total catch: {show(total_litres, 3)} L",
-            f"Mean per nozzle: {show(mean)} ml",
-            f"Lowest / highest: {show(low)} / {show(high)} ml",
-            f"Travel speed: {show(speed, 2)} km/h",
-            f"Spray volume: {show(spray_volume)} L/ha",
-            "",
-            f"Tank volume: {show(tank_volume, 0)} L",
-            f"Area per tank: {show(area_per_tank, 2)} ha",
-            "",
-            "Products per tank:",
-        ]
-    )
+    for replication_number, readings in enumerate(readings_by_rep, start=1):
+        rows.append(f"Replication {replication_number} nozzle catches:")
+        rows.extend(f"  Nozzle {index + 1}: {show(reading)} ml" for index, reading in enumerate(readings))
+        rows.append("")
+
+    rows.extend([
+        "Average results across 3 replications:",
+        f"Average total catch: {show(results['average_total_ml'] / 1000 if valid(results['average_total_ml']) else None, 3)} L",
+        f"Mean per nozzle: {show(results['overall_mean'])} ml",
+        f"Lowest / highest nozzle mean: {show(results['low'])} / {show(results['high'])} ml",
+        f"Travel speed: {show(speed, 2)} km/h",
+        f"Spray volume: {show(spray_volume)} L/ha",
+        "",
+        "Nozzle mean and deviation:",
+    ])
+    for index, (nozzle_mean, deviation) in enumerate(zip(results["nozzle_means"], results["deviations"]), start=1):
+        status = "CHECK" if valid(deviation) and abs(deviation) > 10 else ("OK" if valid(deviation) else "—")
+        rows.append(f"  Nozzle {index}: {show(nozzle_mean)} ml | {show(deviation)}% | {status}")
+    rows.extend([
+        "",
+        f"Tank volume: {show(tank_volume, 0)} L",
+        f"Area per tank: {show(area_per_tank, 2)} ha",
+        "",
+        "Products per tank:",
+    ])
     for product in products:
-        unit = product["unit"]
         rows.append(
-            f"  {product['name']}: {show(product['rate'], 3)} {unit}/ha → "
-            f"{show(product['amount'], 3)} {unit} per tank"
+            f"  {product['name']}: {show(product['rate'], 3)} {product['unit']}/ha → "
+            f"{show(product['amount'], 3)} {product['unit']} per tank"
         )
     return "\n".join(rows)
 
@@ -175,17 +210,18 @@ def build_excel_export(
     distance: float,
     seconds: float | None,
     width: float | None,
-    readings: list[float | None],
+    readings_by_rep: list[list[float | None]],
+    results: dict[str, object],
+    spray_volume: float | None,
+    speed: float | None,
     tank_volume: float | None,
+    area_per_tank: float | None,
     products: list[dict[str, object]],
 ) -> bytes:
-    """Create a formatted Excel workbook with editable inputs and formulas."""
+    """Create an Excel record containing all three reps and current results."""
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Calibration"
-    workbook.calculation.fullCalcOnLoad = True
-    workbook.calculation.forceFullCalc = True
-    workbook.calculation.calcMode = "auto"
 
     dark_green = "0B5B3D"
     soft_green = "E8F4ED"
@@ -197,23 +233,25 @@ def build_excel_export(
     result_fill = PatternFill("solid", fgColor=soft_green)
     border = Border(left=thin_green, right=thin_green, top=thin_green, bottom=thin_green)
 
-    sheet.merge_cells("A1:D1")
-    sheet["A1"] = "Boom Sprayer Calibration Results"
+    def section_header(row: int, title: str, end_column: int = 7) -> None:
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_column)
+        cell = sheet.cell(row, 1, title)
+        cell.font = Font(bold=True, color=white)
+        cell.fill = section_fill
+
+    sheet.merge_cells("A1:G1")
+    sheet["A1"] = "Boom Sprayer Calibration Results — 3 Replications"
     sheet["A1"].font = Font(bold=True, color=white, size=16)
     sheet["A1"].fill = section_fill
     sheet["A1"].alignment = Alignment(horizontal="center")
     sheet.row_dimensions[1].height = 26
 
-    sheet["A3"] = "Calibration inputs"
-    sheet["A3"].font = Font(bold=True, color=white)
-    sheet["A3"].fill = section_fill
-    sheet.merge_cells("A3:D3")
-
+    section_header(3, "Calibration inputs")
     inputs = [
         ("Test distance (m)", distance),
         ("Time over distance (seconds)", seconds),
         ("Spray width (m)", width),
-        ("Number of boom nozzles", len(readings)),
+        ("Number of boom nozzles", len(readings_by_rep[0])),
         ("Tank volume (L)", tank_volume),
     ]
     for row, (label, value) in enumerate(inputs, start=4):
@@ -223,67 +261,64 @@ def build_excel_export(
         value_cell.border = border
         value_cell.font = Font(color="0000FF")
         value_cell.number_format = "0.000"
-        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=7)
 
     nozzle_header_row = 10
-    sheet.cell(nozzle_header_row, 1, "Nozzle readings")
-    sheet.cell(nozzle_header_row, 1).font = Font(bold=True, color=white)
-    sheet.cell(nozzle_header_row, 1).fill = section_fill
-    sheet.merge_cells(start_row=nozzle_header_row, start_column=1, end_row=nozzle_header_row, end_column=4)
-    for column, heading in enumerate(["Nozzle", "Catch (ml)", "Deviation vs mean", "Status"], start=1):
+    section_header(nozzle_header_row, "Nozzle catches and deviation from mean")
+    headings = ["Nozzle", "Rep 1 (ml)", "Rep 2 (ml)", "Rep 3 (ml)", "Mean catch (ml)", "% deviation", "Status"]
+    for column, heading in enumerate(headings, start=1):
         cell = sheet.cell(nozzle_header_row + 1, column, heading)
         cell.font = Font(bold=True, color=white)
         cell.fill = section_fill
         cell.border = border
 
-    nozzle_first_row = nozzle_header_row + 2
-    nozzle_last_row = nozzle_first_row + len(readings) - 1
-    for index, reading in enumerate(readings, start=1):
-        row = nozzle_first_row + index - 1
-        sheet.cell(row, 1, index)
-        reading_cell = sheet.cell(row, 2, reading)
-        reading_cell.fill = input_fill
-        reading_cell.border = border
-        reading_cell.font = Font(color="0000FF")
-        reading_cell.number_format = "0.000"
-        deviation_cell = sheet.cell(row, 3, f'=IFERROR((B{row}-$B${nozzle_last_row + 4})/$B${nozzle_last_row + 4},"")')
+    first_nozzle_row = nozzle_header_row + 2
+    for index in range(len(readings_by_rep[0])):
+        row = first_nozzle_row + index
+        sheet.cell(row, 1, index + 1)
+        for replication_index, readings in enumerate(readings_by_rep, start=2):
+            input_cell = sheet.cell(row, replication_index, readings[index])
+            input_cell.fill = input_fill
+            input_cell.font = Font(color="0000FF")
+            input_cell.number_format = "0.000"
+        mean_cell = sheet.cell(row, 5, results["nozzle_means"][index])
+        deviation = results["deviations"][index]
+        deviation_cell = sheet.cell(row, 6, deviation / 100 if valid(deviation) else None)
         deviation_cell.number_format = "0.0%"
-        status_cell = sheet.cell(row, 4, f'=IF(C{row}="","",IF(ABS(C{row})>10%,"Check","OK"))')
-        for column in range(1, 5):
-            sheet.cell(row, column).border = border
+        status = "Check" if valid(deviation) and abs(deviation) > 10 else ("OK" if valid(deviation) else "")
+        sheet.cell(row, 7, status)
+        for column in range(1, 8):
+            cell = sheet.cell(row, column)
+            cell.border = border
+            if column in (5, 6, 7):
+                cell.fill = result_fill
+        mean_cell.number_format = "0.000"
 
-    result_header_row = nozzle_last_row + 2
-    sheet.cell(result_header_row, 1, "Calculated results")
-    sheet.cell(result_header_row, 1).font = Font(bold=True, color=white)
-    sheet.cell(result_header_row, 1).fill = section_fill
-    sheet.merge_cells(start_row=result_header_row, start_column=1, end_row=result_header_row, end_column=4)
-
+    result_header_row = first_nozzle_row + len(readings_by_rep[0]) + 2
+    section_header(result_header_row, "Calculated results")
+    average_total_litres = results["average_total_ml"] / 1000 if valid(results["average_total_ml"]) else None
     result_rows = [
-        ("Total catch (L)", f'=IFERROR(SUM(B{nozzle_first_row}:B{nozzle_last_row})/1000,"")', "0.000"),
-        ("Mean per nozzle (ml)", f'=IFERROR(AVERAGE(B{nozzle_first_row}:B{nozzle_last_row}),"")', "0.000"),
-        ("Lowest nozzle catch (ml)", f'=IFERROR(MIN(B{nozzle_first_row}:B{nozzle_last_row}),"")', "0.000"),
-        ("Highest nozzle catch (ml)", f'=IFERROR(MAX(B{nozzle_first_row}:B{nozzle_last_row}),"")', "0.000"),
-        ("Spray volume (L/ha)", f'=IFERROR(10000*B{result_header_row + 1}/($B$4*$B$6),"")', "0.000"),
-        ("Travel speed (km/h)", '=IFERROR($B$4/$B$5*3.6,"")', "0.00"),
-        ("Area per tank (ha)", f'=IFERROR($B$8/B{result_header_row + 5},"")', "0.000"),
+        ("Average total catch (L)", average_total_litres, "0.000"),
+        ("Mean per nozzle (ml)", results["overall_mean"], "0.000"),
+        ("Lowest nozzle mean (ml)", results["low"], "0.000"),
+        ("Highest nozzle mean (ml)", results["high"], "0.000"),
+        ("Spray volume (L/ha)", spray_volume, "0.000"),
+        ("Travel speed (km/h)", speed, "0.00"),
+        ("Area per tank (ha)", area_per_tank, "0.000"),
     ]
-    for offset, (label, formula, number_format) in enumerate(result_rows, start=1):
+    for offset, (label, value, number_format) in enumerate(result_rows, start=1):
         row = result_header_row + offset
         sheet.cell(row, 1, label)
-        result_cell = sheet.cell(row, 2, formula)
+        result_cell = sheet.cell(row, 2, value)
         result_cell.number_format = number_format
         result_cell.fill = result_fill
         result_cell.font = Font(bold=True)
-        for column in range(1, 5):
+        for column in range(1, 8):
             sheet.cell(row, column).border = border
-        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=7)
 
-    area_cell = f"B{result_header_row + len(result_rows)}"
     product_header_row = result_header_row + len(result_rows) + 2
-    sheet.cell(product_header_row, 1, "Products per tank")
-    sheet.cell(product_header_row, 1).font = Font(bold=True, color=white)
-    sheet.cell(product_header_row, 1).fill = section_fill
-    sheet.merge_cells(start_row=product_header_row, start_column=1, end_row=product_header_row, end_column=4)
+    section_header(product_header_row, "Products per tank", end_column=4)
     for column, heading in enumerate(["Product", "Label rate", "Unit", "Required per tank"], start=1):
         cell = sheet.cell(product_header_row + 1, column, heading)
         cell.font = Font(bold=True, color=white)
@@ -292,29 +327,26 @@ def build_excel_export(
 
     for index, product in enumerate(products, start=1):
         row = product_header_row + 1 + index
-        name_cell = sheet.cell(row, 1, product["name"])
-        rate_cell = sheet.cell(row, 2, product["rate"])
-        unit_cell = sheet.cell(row, 3, product["unit"])
-        amount_cell = sheet.cell(row, 4, f'=IFERROR({area_cell}*B{row},"")')
-        for cell in (name_cell, rate_cell, unit_cell):
-            cell.fill = input_fill
-            cell.font = Font(color="0000FF")
-        rate_cell.number_format = "0.000"
-        amount_cell.number_format = "0.000"
-        amount_cell.fill = result_fill
-        amount_cell.font = Font(bold=True)
-        for column in range(1, 5):
-            sheet.cell(row, column).border = border
+        values = [product["name"], product["rate"], product["unit"], product["amount"]]
+        for column, value in enumerate(values, start=1):
+            cell = sheet.cell(row, column, value)
+            cell.border = border
+            if column < 4:
+                cell.fill = input_fill
+                cell.font = Font(color="0000FF")
+            else:
+                cell.fill = result_fill
+                cell.font = Font(bold=True)
+                cell.number_format = "0.000"
+        sheet.cell(row, 2).number_format = "0.000"
 
     note_row = product_header_row + len(products) + 4
-    sheet.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=4)
-    sheet.cell(note_row, 1, "Yellow cells are editable inputs; green cells are calculated in Excel.")
+    sheet.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=7)
+    sheet.cell(note_row, 1, "Yellow cells record entered inputs; green cells record results calculated by the app at export time.")
     sheet.cell(note_row, 1).font = Font(italic=True, color="555555")
 
-    sheet.column_dimensions["A"].width = 30
-    sheet.column_dimensions["B"].width = 18
-    sheet.column_dimensions["C"].width = 20
-    sheet.column_dimensions["D"].width = 22
+    for column, width_value in {"A": 28, "B": 16, "C": 16, "D": 16, "E": 19, "F": 15, "G": 14}.items():
+        sheet.column_dimensions[column].width = width_value
     sheet.freeze_panes = "A4"
 
     stream = BytesIO()
@@ -324,21 +356,21 @@ def build_excel_export(
 
 st.title("Boom Sprayer Calibration")
 st.write(
-    "Enter the catch from each nozzle separately. The calculator finds the average "
-    "output, identifies uneven nozzles, and calculates spray volume."
+    "Enter the catch from every nozzle for three replications. The calculator averages "
+    "the replications, identifies uneven nozzles, and calculates spray volume."
 )
 
 with st.expander("Field test method", expanded=True):
     st.markdown(
         """1. Measure the test distance: normally **100 m for a tractor** or **30 m for a knapsack**.
 2. Travel that distance at normal spraying speed and record the time.
-3. Run the sprayer for the same time and catch the output from **every nozzle on the boom**. Enter each catch below in ml.
+3. Run the sprayer for the same time and catch the output from **every nozzle on the boom**. Repeat the catch test three times and enter each reading below.
 
 Use clean water. Clean or replace blocked, worn, or visibly uneven nozzles before spraying."""
     )
 
 st.header("1. Calibration details")
-st.caption("The nozzle count should match the number of nozzles for the boom width entered.")
+st.caption("The nozzle count should match the number of nozzles for the boom width entered. The same distance, time, and width apply to all three replications.")
 column_1, column_2 = st.columns(2)
 with column_1:
     distance = st.number_input("Test distance (m)", min_value=0.1, value=100.0, step=0.1, key="distance")
@@ -348,60 +380,61 @@ with column_2:
     count = int(st.number_input("Number of boom nozzles", min_value=1, max_value=120, value=4, step=1, key="nozzle_count"))
 
 st.subheader("Individual nozzle catches")
-st.caption("Catch volume in the same time taken to travel the test distance.")
-for start in range(0, count, 3):
-    columns = st.columns(3)
-    for column, index in zip(columns, range(start, min(start + 3, count))):
-        with column:
-            st.number_input(
-                f"Nozzle {index + 1} (ml)",
-                min_value=0.0,
-                value=None,
-                step=1.0,
-                placeholder="ml",
-                key=f"nozzle_{index}",
-            )
+st.caption("Enter catch volume in ml for the same travel time. Complete all three replications before results are calculated.")
+for replication in REPLICATIONS:
+    st.markdown(f"#### Rep {replication}")
+    for start in range(0, count, 3):
+        columns = st.columns(3)
+        for column, index in zip(columns, range(start, min(start + 3, count))):
+            with column:
+                st.number_input(
+                    f"Nozzle {index + 1} (ml)",
+                    min_value=0.0,
+                    value=None,
+                    step=1.0,
+                    placeholder="ml",
+                    key=f"rep_{replication}_nozzle_{index}",
+                )
 
-readings = [st.session_state.get(f"nozzle_{index}") for index in range(count)]
-entered = [reading for reading in readings if valid(reading) and reading >= 0]
-complete = len(entered) == count
-if complete:
-    total_ml = sum(entered)
-    total_litres = total_ml / 1000
-    mean = total_ml / count
-    low, high = min(entered), max(entered)
-else:
-    total_litres = mean = low = high = None
-
-spray_volume = 10_000 * total_litres / (distance * width) if complete and valid(width) and width > 0 else None
+readings_by_rep = replication_readings(count)
+results = calculation_results(readings_by_rep)
+average_total_litres = results["average_total_ml"] / 1000 if valid(results["average_total_ml"]) else None
+spray_volume = 10_000 * average_total_litres / (distance * width) if valid(average_total_litres) and valid(width) and width > 0 else None
 speed = distance / seconds * 3.6 if valid(seconds) and seconds > 0 else None
 
-st.caption(f"**{len(entered)} of {count}** readings entered")
+entered_caption = " • ".join(f"Rep {rep}: **{entered} of {count}**" for rep, entered in zip(REPLICATIONS, results["entered_per_rep"]))
+st.caption(entered_caption + " readings entered")
 metric_1, metric_2, metric_3, metric_4 = st.columns(4)
-metric_1.metric("Total catch (L)", show(total_litres, 3))
-metric_2.metric("Mean per nozzle (ml)", show(mean))
-metric_3.metric("Lowest / highest (ml)", f"{show(low, 0)} / {show(high, 0)}" if complete else "—")
+metric_1.metric("Average total catch (L)", show(average_total_litres, 3))
+metric_2.metric("Mean per nozzle (ml)", show(results["overall_mean"]))
+metric_3.metric("Lowest / highest mean (ml)", f"{show(results['low'], 0)} / {show(results['high'], 0)}" if results["complete"] else "—")
 metric_4.metric("Spray volume (L/ha)", show(spray_volume))
 
-outliers: list[int] = []
-if complete and mean > 0:
-    st.markdown("##### Nozzle variation from mean")
-    variation_columns = st.columns(3)
-    for index, reading in enumerate(readings):
-        deviation = (reading - mean) / mean * 100
-        flagged = abs(deviation) > 10
-        if flagged:
-            outliers.append(index + 1)
-        variation_columns[index % 3].caption(f"{'⚠️' if flagged else '✓'} Nozzle {index + 1}: {deviation:+.1f}% vs mean")
+st.subheader("Nozzle deviation from mean")
+st.caption("Each nozzle result is the average of its three replications. A check is flagged when a nozzle differs by more than ±10% from the overall mean.")
+if results["complete"]:
+    # The card count follows the nozzle count selected above. Four cards are
+    # shown per row so the result remains readable on smaller screens.
+    for start in range(0, count, 4):
+        indices = range(start, min(start + 4, count))
+        deviation_columns = st.columns(len(indices))
+        for column, index in zip(deviation_columns, indices):
+            deviation = results["deviations"][index]
+            status = "Check" if abs(deviation) > 10 else "OK"
+            column.metric(f"Nozzle {index + 1} deviation", f"{deviation:+.1f}%", status)
+else:
+    st.info("Complete all nozzle readings in Rep 1, Rep 2, and Rep 3 to show the percentage deviation for every nozzle.")
 
-if len(entered) < count:
-    remaining = count - len(entered)
-    st.warning(f"Enter {remaining} remaining nozzle reading{'s' if remaining != 1 else ''} to calculate the result.")
+outliers = [index + 1 for index, deviation in enumerate(results["deviations"]) if valid(deviation) and abs(deviation) > 10]
+for replication, entered in zip(REPLICATIONS, results["entered_per_rep"]):
+    remaining = count - entered
+    if remaining:
+        st.warning(f"Rep {replication}: enter {remaining} remaining nozzle reading{'s' if remaining != 1 else ''} to calculate the result.")
 if outliers:
-    st.warning(f"Check nozzle{'s' if len(outliers) > 1 else ''} {', '.join(map(str, outliers))}: output differs by more than 10% from the mean.")
+    st.warning(f"Check nozzle{'s' if len(outliers) > 1 else ''} {', '.join(map(str, outliers))}: average output differs by more than 10% from the overall mean.")
 if valid(speed) and not 3 <= speed <= 12:
     st.warning("Travel speed is outside the common 3–12 km/h range; verify the measurement and safe operating speed.")
-st.info("**Spray volume (L/ha)** = 10,000 × total nozzle catch (L) ÷ [test distance (m) × spray width (m)].")
+st.info("**Spray volume (L/ha)** = 10,000 × average total nozzle catch across 3 reps (L) ÷ [test distance (m) × spray width (m)].")
 
 st.header("2. Speed and products per tank")
 st.caption("Enter the tank volume once, then add each product and its registered label rate.")
@@ -409,16 +442,7 @@ tank_column, product_count_column = st.columns(2)
 with tank_column:
     tank_volume = st.number_input("Tank volume (L)", min_value=0.0, value=None, step=1.0, placeholder="e.g. 600", key="tank_volume")
 with product_count_column:
-    product_count = int(
-        st.number_input(
-            "Number of products to add",
-            min_value=1,
-            max_value=10,
-            value=1,
-            step=1,
-            key="product_count",
-        )
-    )
+    product_count = int(st.number_input("Number of products to add", min_value=1, max_value=10, value=1, step=1, key="product_count"))
 
 area_per_tank = tank_volume / spray_volume if valid(tank_volume) and valid(spray_volume) and spray_volume > 0 else None
 speed_metric, area_metric = st.columns(2)
@@ -438,31 +462,15 @@ st.table(
     }
 )
 
-summary = build_summary(
-    distance,
-    seconds,
-    width,
-    readings,
-    total_litres,
-    mean,
-    low,
-    high,
-    spray_volume,
-    speed,
-    tank_volume,
-    area_per_tank,
-    products,
-)
-excel_file = build_excel_export(distance, seconds, width, readings, tank_volume, products)
+summary = build_summary(distance, seconds, width, readings_by_rep, results, spray_volume, speed, tank_volume, area_per_tank, products)
+excel_file = build_excel_export(distance, seconds, width, readings_by_rep, results, spray_volume, speed, tank_volume, area_per_tank, products)
 copy_column, export_column, reset_column = st.columns(3)
 with copy_column:
     with st.expander("Copy results"):
         st.caption("Use the copy icon in the top-right of the result box.")
         st.code(summary, language=None)
 with export_column:
-    export_timestamp = datetime.now(
-    ZoneInfo("Africa/Johannesburg")
-).strftime("%Y_%m_%d %H-%M")
+    export_timestamp = datetime.now(timezone(timedelta(hours=2))).strftime("%Y_%m_%d %H-%M")
     st.download_button(
         "Export results to Excel",
         data=excel_file,
