@@ -16,9 +16,10 @@ if st.button("← Back to calculator selection", type="secondary"):
     st.rerun()
 
 
-BASE_KEYS = ("orchard_duration", "orchard_unit")
+BASE_KEYS = ("orchard_duration", "orchard_unit", "orchard_flow_unit")
 REPLICATIONS = (1, 2, 3)
 UNITS = ("ml", "L")
+FLOW_UNITS = ("ml", "L")
 
 
 def valid(value: object) -> bool:
@@ -38,7 +39,12 @@ def reset() -> None:
         st.session_state.pop(key, None)
 
 
-def calculate(readings: list[float | None], duration: float | None) -> dict[str, object]:
+def calculate(
+    readings: list[float | None],
+    duration: float | None,
+    catch_unit: str,
+    flow_unit: str,
+) -> dict[str, object]:
     """Calculate average catch, variation, and flow rate from three replications."""
     entered = [reading for reading in readings if valid(reading) and reading >= 0]
     complete = len(entered) == len(REPLICATIONS)
@@ -54,7 +60,9 @@ def calculate(readings: list[float | None], duration: float | None) -> dict[str,
     average = sum(entered) / len(entered)
     standard_deviation = statistics.stdev(entered) if len(entered) > 1 else 0.0
     deviations = [(reading - average) / average * 100 if average else None for reading in readings]
-    flow_rate = average / duration if valid(duration) and duration > 0 else None
+    average_litres = average / 1000 if catch_unit == "ml" else average
+    flow_rate_litres = average_litres / duration if valid(duration) and duration > 0 else None
+    flow_rate = flow_rate_litres * 1000 if valid(flow_rate_litres) and flow_unit == "ml" else flow_rate_litres
     return {
         "complete": True,
         "average": average,
@@ -67,6 +75,7 @@ def calculate(readings: list[float | None], duration: float | None) -> dict[str,
 def build_summary(
     duration: float | None,
     unit: str,
+    flow_unit: str,
     readings: list[float | None],
     results: dict[str, object],
 ) -> str:
@@ -76,6 +85,7 @@ def build_summary(
         "",
         f"Test duration: {show(duration, 1)} seconds",
         f"Catch-volume unit: {unit}",
+        f"Flow-rate display unit: {flow_unit}/s",
         "",
         "Timed catch replications:",
     ]
@@ -91,7 +101,7 @@ def build_summary(
             "",
             f"Average catch: {show(results['average'])} {unit}",
             f"Standard deviation across reps: {show(results['standard_deviation'])} {unit}",
-            f"Average flow rate: {show(results['flow_rate'])} {unit}/s",
+            f"Average flow rate: {show(results['flow_rate'])} {flow_unit}/s",
         ]
     )
     return "\n".join(rows)
@@ -100,6 +110,7 @@ def build_summary(
 def build_excel_export(
     duration: float | None,
     unit: str,
+    flow_unit: str,
     readings: list[float | None],
     results: dict[str, object],
 ) -> bytes:
@@ -132,7 +143,7 @@ def build_excel_export(
     sheet.row_dimensions[1].height = 26
 
     section_header(3, "Test setup")
-    setup = [("Test duration (seconds)", duration), ("Catch-volume unit", unit)]
+    setup = [("Test duration (seconds)", duration), ("Catch-volume unit", unit), ("Flow-rate display unit", f"{flow_unit}/s")]
     for row, (label, value) in enumerate(setup, start=4):
         sheet.cell(row, 1, label)
         input_cell = sheet.cell(row, 2, value)
@@ -143,15 +154,15 @@ def build_excel_export(
             input_cell.number_format = "0.000"
         sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
 
-    section_header(7, "Timed catch replications")
+    section_header(8, "Timed catch replications")
     for column, heading in enumerate(["Replication", f"Catch ({unit})", "% deviation from mean", "Status"], start=1):
-        cell = sheet.cell(8, column, heading)
+        cell = sheet.cell(9, column, heading)
         cell.font = Font(bold=True, color=white)
         cell.fill = section_fill
         cell.border = border
 
     for replication, reading in zip(REPLICATIONS, readings):
-        row = 8 + replication
+        row = 9 + replication
         deviation = results["deviations"][replication - 1]
         status = "Check" if valid(deviation) and abs(deviation) > 10 else ("OK" if valid(deviation) else "")
         values = [replication, reading, deviation / 100 if valid(deviation) else None, status]
@@ -167,14 +178,14 @@ def build_excel_export(
                 if column == 3:
                     cell.number_format = "0.0%"
 
-    section_header(13, "Calculated results")
+    section_header(14, "Calculated results")
     result_rows = [
         (f"Average catch ({unit})", results["average"], "0.000"),
         (f"Standard deviation ({unit})", results["standard_deviation"], "0.000"),
-        (f"Average flow rate ({unit}/s)", results["flow_rate"], "0.000"),
+        (f"Average flow rate ({flow_unit}/s)", results["flow_rate"], "0.000"),
     ]
     for offset, (label, value, number_format) in enumerate(result_rows, start=1):
-        row = 13 + offset
+        row = 14 + offset
         sheet.cell(row, 1, label)
         result_cell = sheet.cell(row, 2, value)
         result_cell.fill = result_fill
@@ -185,9 +196,9 @@ def build_excel_export(
         for column in range(1, 5):
             sheet.cell(row, column).border = border
 
-    sheet.merge_cells("A19:D19")
-    sheet["A19"] = "Yellow cells record entered inputs; green cells record results calculated by the app at export time."
-    sheet["A19"].font = Font(italic=True, color="555555")
+    sheet.merge_cells("A20:D20")
+    sheet["A20"] = "Yellow cells record entered inputs; green cells record results calculated by the app at export time."
+    sheet["A20"].font = Font(italic=True, color="555555")
     sheet.column_dimensions["A"].width = 33
     sheet.column_dimensions["B"].width = 20
     sheet.column_dimensions["C"].width = 28
@@ -216,7 +227,7 @@ Use clean water. Keep the same sprayer setting and test duration for every repli
     )
 
 st.header("1. Timed catch test")
-setup_column, unit_column = st.columns(2)
+setup_column, unit_column, flow_unit_column = st.columns(3)
 with setup_column:
     duration = st.number_input(
         "Test duration (seconds)",
@@ -227,6 +238,8 @@ with setup_column:
     )
 with unit_column:
     unit = st.selectbox("Catch-volume unit", options=UNITS, key="orchard_unit")
+with flow_unit_column:
+    flow_unit = st.selectbox("Flow-rate display unit", options=FLOW_UNITS, key="orchard_flow_unit")
 
 st.subheader("Catch-volume replications")
 st.caption(f"Enter the total volume caught during {show(duration, 1)} seconds for each replication.")
@@ -244,14 +257,14 @@ for column, replication in zip(replication_columns, REPLICATIONS):
         )
         readings.append(reading)
 
-results = calculate(readings, duration)
+results = calculate(readings, duration, unit, flow_unit)
 entered = len([reading for reading in readings if valid(reading) and reading >= 0])
 st.caption(f"**{entered} of 3** replications entered")
 
 average_metric, standard_deviation_metric, flow_metric = st.columns(3)
 average_metric.metric(f"Average catch ({unit})", show(results["average"]))
 standard_deviation_metric.metric(f"Standard deviation ({unit})", show(results["standard_deviation"]))
-flow_metric.metric(f"Average flow rate ({unit}/s)", show(results["flow_rate"]))
+flow_metric.metric(f"Average flow rate ({flow_unit}/s)", show(results["flow_rate"]))
 
 st.subheader("Replication deviation from average")
 st.caption("A check is flagged when a replication differs by more than ±10% from the average catch volume.")
@@ -269,10 +282,13 @@ if entered < 3:
     st.warning(f"Enter {remaining} remaining replication{'s' if remaining != 1 else ''} to calculate the result.")
 if outliers:
     st.warning(f"Check Rep {' and '.join(map(str, outliers))}: catch volume differs by more than 10% from the average.")
-st.info(f"**Average flow rate ({unit}/s)** = average catch volume ({unit}) ÷ test duration (seconds).")
+st.info(
+    f"**Average flow rate ({flow_unit}/s)** is converted from the average catch volume "
+    f"({unit}) ÷ test duration (seconds)."
+)
 
-summary = build_summary(duration, unit, readings, results)
-excel_file = build_excel_export(duration, unit, readings, results)
+summary = build_summary(duration, unit, flow_unit, readings, results)
+excel_file = build_excel_export(duration, unit, flow_unit, readings, results)
 copy_column, export_column, reset_column = st.columns(3)
 with copy_column:
     with st.expander("Copy results"):
