@@ -27,7 +27,7 @@ CALCULATORS = {
     },
     "orchard": {
         "title": "Orchard Sprayer",
-        "description": "Calibration workflow for orchard spraying equipment.",
+        "description": "Calculate timed-catch flow rate from three replications in ml/s or L/s.",
         "button": "Open Orchard Sprayer calculator",
     },
     "mistblower": {
@@ -45,14 +45,16 @@ def choose(calculator: str) -> None:
 selected = st.session_state.get("selected_calculator")
 if selected == "boom":
     runpy.run_path(str(Path(__file__).parent / "calculators" / "boom_sprayer.py"))
-elif selected in {"orchard", "mistblower"}:
+elif selected == "orchard":
+    runpy.run_path(str(Path(__file__).parent / "calculators" / "orchard_sprayer.py"))
+elif selected == "mistblower":
     from calculators.placeholder import render
     card = CALCULATORS[selected]
     render(card["title"], card["description"])
 else:
     st.title("Sprayer Calibration")
     st.write("Select the equipment type to open the appropriate calibration calculator.")
-    st.caption("The Boom Sprayer calculator is available now. Orchard Sprayer and Mistblower will be added as their field methods are confirmed.")
+    st.caption("Boom Sprayer and Orchard Sprayer are available now. Mistblower will be added once its field method is confirmed.")
 
     columns = st.columns(3)
     for column, key in zip(columns, CALCULATORS):
