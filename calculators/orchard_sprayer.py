@@ -39,13 +39,31 @@ def reset() -> None:
         st.session_state.pop(key, None)
 
 
+def flow_rate_for_volume(
+    volume: float | None,
+    duration: float | None,
+    catch_unit: str,
+    flow_unit: str,
+) -> float | None:
+    """Convert one timed catch reading to the selected flow-rate unit."""
+    if not valid(volume) or volume < 0 or not valid(duration) or duration <= 0:
+        return None
+    volume_litres = volume / 1000 if catch_unit == "ml" else volume
+    rate_litres = volume_litres / duration
+    return rate_litres * 1000 if flow_unit == "ml" else rate_litres
+
+
 def calculate(
     readings: list[float | None],
     duration: float | None,
     catch_unit: str,
     flow_unit: str,
 ) -> dict[str, object]:
-    """Calculate average catch, variation, and flow rate from three replications."""
+    """Calculate individual and average flow rates from three replications."""
+    rep_flow_rates = [
+        flow_rate_for_volume(reading, duration, catch_unit, flow_unit)
+        for reading in readings
+    ]
     entered = [reading for reading in readings if valid(reading) and reading >= 0]
     complete = len(entered) == len(REPLICATIONS)
     if not complete:
@@ -54,20 +72,20 @@ def calculate(
             "average": None,
             "standard_deviation": None,
             "flow_rate": None,
+            "rep_flow_rates": rep_flow_rates,
             "deviations": [None] * len(REPLICATIONS),
         }
 
     average = sum(entered) / len(entered)
     standard_deviation = statistics.stdev(entered) if len(entered) > 1 else 0.0
     deviations = [(reading - average) / average * 100 if average else None for reading in readings]
-    average_litres = average / 1000 if catch_unit == "ml" else average
-    flow_rate_litres = average_litres / duration if valid(duration) and duration > 0 else None
-    flow_rate = flow_rate_litres * 1000 if valid(flow_rate_litres) and flow_unit == "ml" else flow_rate_litres
+    flow_rate = flow_rate_for_volume(average, duration, catch_unit, flow_unit)
     return {
         "complete": True,
         "average": average,
         "standard_deviation": standard_deviation,
         "flow_rate": flow_rate,
+        "rep_flow_rates": rep_flow_rates,
         "deviations": deviations,
     }
 
@@ -89,11 +107,12 @@ def build_summary(
         "",
         "Timed catch replications:",
     ]
-    for replication, reading in zip(REPLICATIONS, readings):
+    for replication, reading, rep_flow_rate in zip(REPLICATIONS, readings, results["rep_flow_rates"]):
         deviation = results["deviations"][replication - 1]
         status = "CHECK" if valid(deviation) and abs(deviation) > 10 else ("OK" if valid(deviation) else "—")
         rows.append(
             f"  Rep {replication}: {show(reading)} {unit} | "
+            f"Flow rate: {show(rep_flow_rate)} {flow_unit}/s | "
             f"{show(deviation, 1)}% vs mean | {status}"
         )
     rows.extend(
@@ -130,12 +149,12 @@ def build_excel_export(
     border = Border(left=thin_green, right=thin_green, top=thin_green, bottom=thin_green)
 
     def section_header(row: int, title: str) -> None:
-        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
         cell = sheet.cell(row, 1, title)
         cell.font = Font(bold=True, color=white)
         cell.fill = section_fill
 
-    sheet.merge_cells("A1:D1")
+    sheet.merge_cells("A1:E1")
     sheet["A1"] = "Orchard Sprayer Calibration Results"
     sheet["A1"].font = Font(bold=True, color=white, size=16)
     sheet["A1"].fill = section_fill
@@ -152,20 +171,20 @@ def build_excel_export(
         input_cell.border = border
         if isinstance(value, (int, float)):
             input_cell.number_format = "0.000"
-        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
 
     section_header(8, "Timed catch replications")
-    for column, heading in enumerate(["Replication", f"Catch ({unit})", "% deviation from mean", "Status"], start=1):
+    for column, heading in enumerate(["Replication", f"Catch ({unit})", f"Flow rate ({flow_unit}/s)", "% deviation from mean", "Status"], start=1):
         cell = sheet.cell(9, column, heading)
         cell.font = Font(bold=True, color=white)
         cell.fill = section_fill
         cell.border = border
 
-    for replication, reading in zip(REPLICATIONS, readings):
+    for replication, reading, rep_flow_rate in zip(REPLICATIONS, readings, results["rep_flow_rates"]):
         row = 9 + replication
         deviation = results["deviations"][replication - 1]
         status = "Check" if valid(deviation) and abs(deviation) > 10 else ("OK" if valid(deviation) else "")
-        values = [replication, reading, deviation / 100 if valid(deviation) else None, status]
+        values = [replication, reading, rep_flow_rate, deviation / 100 if valid(deviation) else None, status]
         for column, value in enumerate(values, start=1):
             cell = sheet.cell(row, column, value)
             cell.border = border
@@ -173,10 +192,10 @@ def build_excel_export(
                 cell.fill = input_fill
                 cell.font = Font(color="0000FF")
                 cell.number_format = "0.000"
-            elif column in (3, 4):
+            elif column in (3, 4, 5):
                 cell.fill = result_fill
-                if column == 3:
-                    cell.number_format = "0.0%"
+                if column in (3, 4):
+                    cell.number_format = "0.000" if column == 3 else "0.0%"
 
     section_header(14, "Calculated results")
     result_rows = [
@@ -192,17 +211,18 @@ def build_excel_export(
         result_cell.font = Font(bold=True)
         result_cell.border = border
         result_cell.number_format = number_format
-        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
-        for column in range(1, 5):
+        sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
+        for column in range(1, 6):
             sheet.cell(row, column).border = border
 
-    sheet.merge_cells("A20:D20")
+    sheet.merge_cells("A20:E20")
     sheet["A20"] = "Yellow cells record entered inputs; green cells record results calculated by the app at export time."
     sheet["A20"].font = Font(italic=True, color="555555")
     sheet.column_dimensions["A"].width = 33
     sheet.column_dimensions["B"].width = 20
     sheet.column_dimensions["C"].width = 28
-    sheet.column_dimensions["D"].width = 14
+    sheet.column_dimensions["D"].width = 28
+    sheet.column_dimensions["E"].width = 14
     sheet.freeze_panes = "A4"
 
     stream = BytesIO()
@@ -261,6 +281,11 @@ results = calculate(readings, duration, unit, flow_unit)
 entered = len([reading for reading in readings if valid(reading) and reading >= 0])
 st.caption(f"**{entered} of 3** replications entered")
 
+st.caption(f"Flow rate for each replication ({flow_unit}/s)")
+rep_flow_columns = st.columns(3)
+for column, replication, rep_flow_rate in zip(rep_flow_columns, REPLICATIONS, results["rep_flow_rates"]):
+    column.metric(f"Rep {replication} flow rate ({flow_unit}/s)", show(rep_flow_rate))
+
 average_metric, standard_deviation_metric, flow_metric = st.columns(3)
 average_metric.metric(f"Average catch ({unit})", show(results["average"]))
 standard_deviation_metric.metric(f"Standard deviation ({unit})", show(results["standard_deviation"]))
@@ -283,8 +308,8 @@ if entered < 3:
 if outliers:
     st.warning(f"Check Rep {' and '.join(map(str, outliers))}: catch volume differs by more than 10% from the average.")
 st.info(
-    f"**Average flow rate ({flow_unit}/s)** is converted from the average catch volume "
-    f"({unit}) ÷ test duration (seconds)."
+    f"**Flow rate for each replication ({flow_unit}/s)** = that replication's catch volume "
+    f"({unit}) ÷ test duration (seconds). **Average flow rate** is calculated from the average catch volume."
 )
 
 summary = build_summary(duration, unit, flow_unit, readings, results)
